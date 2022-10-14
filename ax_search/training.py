@@ -45,9 +45,9 @@ class ArgsList:
     rerun: bool
     n_states: int
     n_atoms: int
-    training_targets: json.loads
+    training_targets: list
     log_filename: str
-    possible_species: json.loads
+    possible_species: list
     n_interactions: int
     n_atom_layers: int
     n_features: int
@@ -57,7 +57,7 @@ class ArgsList:
     cutoff_distance: float
     dataset_location: str
     dataset_name: str
-    split_ratio: json.loads
+    split_ratio: list
     seed: int
     n_workers: int
     plot_frequency: int
@@ -453,6 +453,19 @@ class CustomFormatter(
     pass
 
 
+def read_list(input_str: str):
+    input_str = input_str.split(",")
+    # try to convert each string to int
+    try:
+        return list(map(int, input_str))
+    except ValueError:
+        # then try to convert each string to float
+        try:
+            return list(map(float, input_str))
+        # otherwise keep it as string, and stripe quotes and spaces
+        except ValueError:
+            return [_.strip(" '\"") for _ in input_str]
+
 def read_args(
     tag="test",
     gpu=0,
@@ -559,9 +572,13 @@ def read_args(
     )
     parser.add_argument(
         "--training-targets",
-        type=json.loads,
+        type=read_list,
         default=training_targets,
-        help="a quoted list with the target quantities to train",
+        help=(
+            "comma separated list with the target quantities to train\n"
+            "for example --training-targets='energy, dipole' or"
+            "--training-targets='energy','dipole'"
+        )
     )
     parser.add_argument(
         "--log-filename",
@@ -573,11 +590,12 @@ def read_args(
     # network parameters
     parser.add_argument(
         "--possible-species",
-        type=json.loads,
+        type=read_list,
         default=possible_species,
         help=(
-            "a quoted list of possible species in the dataset\n"
-            "a padding '0' should always be in the list"
+            "comma separated list of possible species in the dataset\n"
+            "a padding '0' should always be in the list\n"
+            "for example --possible-species=0,1,6 or --possible-species='0, 1, 6'"
         ),
     )
     parser.add_argument(
@@ -640,11 +658,12 @@ def read_args(
     )
     parser.add_argument(
         "--split-ratio",
-        type=json.loads,
+        type=read_list,
         default=split_ratio,
         help=(
-            "a quoted list of split ratio for the test and validation set\n"
-            "can be number of points (integers) or ratios (fraction numbers)"
+            "comma separated list of split ratio for the test and validation set\n"
+            "can be number of points (integers) or ratios (fraction numbers)\n"
+            "for example --split-ratio=0.1,0.2 or --split-ratio='1111, 2222'"
         ),
     )
     parser.add_argument(
@@ -703,7 +722,7 @@ def read_args(
         help="number of plateau epochs before early stopping the training process",
     )
 
-    args = parser.parse_args(bypass_cli_args, namespace=ArgsList)
+    args = parser.parse_args(namespace=ArgsList)
     return args
 
 
