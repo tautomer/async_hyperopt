@@ -4,7 +4,7 @@ import json
 import os
 import shutil
 import sys
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 import hippynn
 import matplotlib
@@ -27,7 +27,7 @@ torch.set_default_dtype(torch.float32)
 
 
 @dataclass(repr=True)
-class ArgsList:
+class ArgsList(argparse.Namespace):
     """
     List of all CLI/Ray arguments. For code intellisense only. As all attributes of
     argparser are defined dynamically, there is no way for the editor to know what they
@@ -38,6 +38,7 @@ class ArgsList:
 
     tag: str
     gpu: int
+    interactive: bool
     noprogress: bool
     custom_kernel: bool
     handle_work_dir: bool
@@ -145,12 +146,14 @@ def nacr_target(
     outputs = []
     # build the charge_nodes if dipole is not a target
     if "dipole" not in training_targets or no_reuse_charges:
+        print("Create a new set of charge nodes for NACR predictions")
         charge_nodes = []
         for i in range(n_states):
             charge_nodes.append(targets.HChargeNode(f"HCharge{i+1}", network))
         training_targets["nacr"]["charge_nodes"] = charge_nodes
     # otherwise take it from dipole's dictionary
     else:
+        print("Reuse the charge nodes from dipoles for NACR predictions")
         charge_nodes = training_targets["dipole"]["charge_nodes"]
         training_targets["nacr"]["charge_nodes"] = charge_nodes
     # obtain the energy nodes from energy's dictionary
@@ -359,7 +362,7 @@ def main(params: ArgsList):
         "n_atom_layers": params.n_atom_layers,
     }
     # dump parameters to the log file
-    print(json.dumps(network_params, indent=4))
+    print("Network parameters\n\n", json.dumps(network_params, indent=4))
 
     _, positions, network = build_network(network_params)
     training_targets = build_output_layer(params, network, positions)
@@ -478,6 +481,7 @@ def read_list(input_str: str):
 def read_args(
     tag="test",
     gpu=0,
+    interactive=False,
     noprogress=False,
     custom_kernel=False,
     handle_work_dir=False,
@@ -535,6 +539,14 @@ def read_args(
     parser.add_argument("--tag", type=str, default=tag, help="name for run")
     parser.add_argument("--gpu", type=int, default=gpu, help="which GPU to run on")
     parser.add_argument(
+        "-i",
+        "--interactive",
+        action="store_true",
+        default=interactive,
+        help="output will be printed on terminal as well when true",
+    )
+    parser.add_argument(
+        "-P",
         "--noprogress",
         action="store_true",
         default=noprogress,
@@ -738,7 +750,9 @@ def read_args(
         help="number of plateau epochs before early stopping the training process",
     )
 
-    args = parser.parse_args(namespace=ArgsList)
+    # this way `print(args)` will show all fields
+    # but `parser.parse_args(namespace=ArgsList)` won't
+    args = ArgsList(**vars(parser.parse_args()))
     return args
 
 
@@ -750,14 +764,33 @@ if __name__ == "__main__":
         init_batch_size=512,
         split_ratio=[0.3, 0.2],
     )
+    # check/create path
     if params.handle_work_dir:
         results = path_handler(params)
         if results:
             print(json.dumps(results, indent=4))
             sys.exit(0)
-    with open(params.log_filename, "w") as log_file:
-        # this way is preferred than `hippynn.tools.log_terminal`
-        # because the terminal output will be completely suppressed now
-        # which could result in a huge SLURM log file if many searches are performed
-        with contextlib.redirect_stdout(log_file):
-            main(params)
+    # redirect output
+    interactive = params.interactive
+    log_file = params.log_filename
+    # use `hippynn.tools.log_terminal` in the interactive mode
+    # otherwise completely suppress stdout
+    # to avoid a huge SLURM log file if many searches are performed
+    with hippynn.tools.log_terminal(
+        log_file, "wt"
+    ) if interactive else contextlib.redirect_stdout(open(log_file, "w")):
+        # FIXME: as soon as hippynn is imported, this block won't work
+        # if gpu != 1
+        if params.gpu:
+            print("Check CUDA device settings")
+            # set GPU order
+            os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+            # if "CUDA_VISIBLE_DEVICES" is not set or different from params.gpu
+            if os.environ.get("CUDA_VISIBLE_DEVICES") != str(params.gpu):
+                # set correct environmental variable
+                os.environ["CUDA_VISIBLE_DEVICES"] = str(params.gpu)
+                print(f'Set "CUDA_VISIBLE_DEVICES"]" to {params.gpu}')
+            # only GPU #params.gpu will be visible now, so set the value to 0
+            params.gpu = 0
+        print("List of all arguments\n\n", json.dumps(asdict(params), indent=4))
+        main(params)
