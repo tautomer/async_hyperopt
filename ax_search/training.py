@@ -46,7 +46,7 @@ class ArgsList:
     n_states: int
     n_atoms: int
     training_targets: list
-    reuse_charges: bool
+    no_reuse_charges: bool
     log_filename: str
     possible_species: list
     n_interactions: int
@@ -134,7 +134,7 @@ def nacr_target(
     n_atoms: int,
     network: networks.Hipnn,
     positions: inputs.PositionsNode,
-    reuse_charges=True,
+    no_reuse_charges=False,
 ):
     training_targets["nacr"] = {
         "mse_loss_func": MSEPhaseLoss,
@@ -144,14 +144,15 @@ def nacr_target(
     }
     outputs = []
     # build the charge_nodes if dipole is not a target
-    if "dipole" not in training_targets or not reuse_charges:
+    if "dipole" not in training_targets or no_reuse_charges:
         charge_nodes = []
         for i in range(n_states):
             charge_nodes.append(targets.HChargeNode(f"HCharge{i+1}", network))
-        training_targets["nacr"] = {"charge_nodes": charge_nodes}
+        training_targets["nacr"]["charge_nodes"] = charge_nodes
     # otherwise take it from dipole's dictionary
     else:
         charge_nodes = training_targets["dipole"]["charge_nodes"]
+        training_targets["nacr"]["charge_nodes"] = charge_nodes
     # obtain the energy nodes from energy's dictionary
     energy_nodes = training_targets["energy"]["energy_nodes"]
     for i in range(n_states):
@@ -200,7 +201,12 @@ def build_output_layer(
     # NACR is treated separately
     if train_nacr:
         training_targets = nacr_target(
-            training_targets, n_states, params.n_atoms, network, positions
+            training_targets,
+            n_states,
+            params.n_atoms,
+            network,
+            positions,
+            params.no_reuse_charges,
         )
     return training_targets
 
@@ -480,7 +486,7 @@ def read_args(
     n_states=5,
     n_atoms=6,
     training_targets=["energy", "dipole", "nacr"],
-    reuse_charges=True,
+    no_reuse_charges=False,
     log_filename="training_log.txt",
     possible_species=[0, 1, 6],
     n_interactions=3,
@@ -585,9 +591,9 @@ def read_args(
         ),
     )
     parser.add_argument(
-        "--reuse-charges",
-        action="store_false",
-        default=reuse_charges,
+        "--no-reuse-charges",
+        action="store_true",
+        default=no_reuse_charges,
         help="whether to generate a set of chargers for NACR",
     )
     parser.add_argument(
