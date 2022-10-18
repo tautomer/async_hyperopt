@@ -17,7 +17,7 @@ from hippynn.experiment.controllers import PatienceController, RaiseBatchSizeOnP
 from hippynn.graphs import inputs, loss, networks, physics, targets
 
 # increase the recursion limit for now
-# sys.setrecursionlimit(756)
+sys.setrecursionlimit(2000)
 # if `tkagg` is default, plotting speed will be horrible
 matplotlib.use("Agg")
 # default types for torch
@@ -46,6 +46,7 @@ class ArgsList:
     n_states: int
     n_atoms: int
     training_targets: list
+    reuse_charges: bool
     log_filename: str
     possible_species: list
     n_interactions: int
@@ -133,6 +134,7 @@ def nacr_target(
     n_atoms: int,
     network: networks.Hipnn,
     positions: inputs.PositionsNode,
+    reuse_charges=True,
 ):
     training_targets["nacr"] = {
         "mse_loss_func": MSEPhaseLoss,
@@ -142,7 +144,7 @@ def nacr_target(
     }
     outputs = []
     # build the charge_nodes if dipole is not a target
-    if "dipole" not in training_targets:
+    if "dipole" not in training_targets or not reuse_charges:
         charge_nodes = []
         for i in range(n_states):
             charge_nodes.append(targets.HChargeNode(f"HCharge{i+1}", network))
@@ -466,6 +468,7 @@ def read_list(input_str: str):
         except ValueError:
             return [_.strip(" '\"") for _ in input_str]
 
+
 def read_args(
     tag="test",
     gpu=0,
@@ -477,6 +480,7 @@ def read_args(
     n_states=5,
     n_atoms=6,
     training_targets=["energy", "dipole", "nacr"],
+    reuse_charges=True,
     log_filename="training_log.txt",
     possible_species=[0, 1, 6],
     n_interactions=3,
@@ -578,7 +582,13 @@ def read_args(
             "comma separated list with the target quantities to train\n"
             "for example --training-targets='energy, dipole' or"
             "--training-targets='energy','dipole'"
-        )
+        ),
+    )
+    parser.add_argument(
+        "--reuse-charges",
+        action="store_false",
+        default=reuse_charges,
+        help="whether to generate a set of chargers for NACR",
     )
     parser.add_argument(
         "--log-filename",
