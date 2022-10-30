@@ -1,12 +1,16 @@
 #!/vast/home/lix/miniconda3/envs/jupyter-env/bin/python3.9 -u
-# SBATCH --time=2-00:00:00
-# SBATCH --nodes=1
-# SBATCH --ntasks=40
-# SBATCH --mail-type=all
-# SBATCH -p ml4chem
-# SBATCH -J hyperopt
-# SBATCH --qos=long
-# SBATCH -o run.log
+# fmt: off
+#SBATCH --time=2-00:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=40
+#SBATCH --mail-type=all
+#SBATCH -p ml4chem
+#SBATCH -J hyperopt
+#SBATCH --qos=long
+#SBATCH -o run.log
+import sys
+
+# fmt: on
 """
     B-Opt tuning for HIPNN using AX.
 
@@ -14,7 +18,6 @@
 
 import json
 import os
-import sys
 
 # Use service client for more control; including checkpointing.
 import ax

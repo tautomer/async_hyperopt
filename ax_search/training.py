@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 from dataclasses import asdict, dataclass
+from typing import Union
 
 import hippynn
 import matplotlib
@@ -14,6 +15,7 @@ from hippynn import plotting
 from hippynn.additional import MAEPhaseLoss, MSEPhaseLoss, NACRNode
 from hippynn.experiment import setup_and_train
 from hippynn.experiment.controllers import PatienceController, RaiseBatchSizeOnPlateau
+from hippynn.experiment.serialization import load_checkpoint_from_cwd
 from hippynn.graphs import inputs, loss, networks, physics, targets
 
 # increase the recursion limit for now
@@ -27,7 +29,7 @@ torch.set_default_dtype(torch.float32)
 
 
 @dataclass(repr=True)
-class ArgsList(argparse.Namespace):
+class ArgsList:
     """
     List of all CLI/Ray arguments. For code intellisense only. As all attributes of
     argparser are defined dynamically, there is no way for the editor to know what they
@@ -37,13 +39,14 @@ class ArgsList(argparse.Namespace):
     """
 
     tag: str
-    gpu: int
+    device: int
     interactive: bool
     noprogress: bool
     custom_kernel: bool
     handle_work_dir: bool
     work_dir: str
-    rerun: bool
+    retrain: bool
+    reload: bool
     n_states: int
     n_atoms: int
     training_targets: list
@@ -281,6 +284,10 @@ def setup_plots(
     return plotting.PlotMaker(*node_plots, plot_every=freq)
 
 
+def setup_parameters(controller: PatienceController, dev: Union[int, str]):
+    return hippynn.experiment.SetupParams(controller=controller, device=dev)
+
+
 def setup_experiment(losses: dict, plotter: plotting.PlotMaker, params: ArgsList):
     # Assemble Pytorch Model that's actually trained.
     training_modules, db_info = hippynn.experiment.assemble_for_training(
@@ -311,10 +318,8 @@ def setup_experiment(losses: dict, plotter: plotting.PlotMaker, params: ArgsList
         termination_patience=params.termination_patience,
     )
 
-    experiment_params = hippynn.experiment.SetupParams(
-        controller=controller,
-        device=params.gpu,
-    )
+    experiment_params = setup_parameters(controller, params.device)
+
     return training_modules, db_info, experiment_params
 
 
@@ -329,8 +334,18 @@ def load_database(params: ArgsList, db_info: dict):
         seed=params.seed,  # Random seed for splitting data
         **db_info,  # Adds the inputs and targets db_names from the model as things to load
     )
-    database.send_to_device(params.gpu)
+    database.send_to_device(params.device)
     return database
+
+
+def reload_model(dev: Union[int, str], mapping=None):
+    checkpoint = load_checkpoint_from_cwd(map_location=mapping)
+    training_modules = checkpoint["training_modules"]
+    controller = checkpoint["controller"]
+    database = checkpoint["database"]
+    metric_tracker = checkpoint["metric_tracker"]
+    experiment_params = setup_parameters(controller, dev)
+    return training_modules, database, experiment_params, controller, metric_tracker
 
 
 def main(params: ArgsList):
@@ -348,6 +363,7 @@ def main(params: ArgsList):
         hippynn.settings.PROGRESS = None
     hippynn.custom_kernels.set_custom_kernels(params.custom_kernel)
     hippynn.settings.WARN_LOW_DISTANCES = False
+    hippynn.settings.TRANSPARENT_PLOT = True
 
     # Hyperparameters for the network
     n_interactions = params.n_interactions
@@ -364,19 +380,24 @@ def main(params: ArgsList):
     # dump parameters to the log file
     print("Network parameters\n\n", json.dumps(network_params, indent=4))
 
-    _, positions, network = build_network(network_params)
-    training_targets = build_output_layer(params, network, positions)
-    freq = params.plot_frequency
-    if freq > 0:
-        plotter = setup_plots(training_targets, network, n_interactions, freq)
+    if params.reload:
+        training_modules, database, experiment_params, _, _ = reload_model(
+            params.device
+        )
     else:
-        plotter = None
-    training_targets = build_loss(training_targets, network)
-    print(training_targets["Losses"].keys())
-    training_modules, db_info, experiment_params = setup_experiment(
-        training_targets["Losses"], plotter, params
-    )
-    database = load_database(params, db_info)
+        _, positions, network = build_network(network_params)
+        training_targets = build_output_layer(params, network, positions)
+        freq = params.plot_frequency
+        if freq > 0:
+            plotter = setup_plots(training_targets, network, n_interactions, freq)
+        else:
+            plotter = None
+        training_targets = build_loss(training_targets, network)
+        print(training_targets["Losses"].keys())
+        training_modules, db_info, experiment_params = setup_experiment(
+            training_targets["Losses"], plotter, params
+        )
+        database = load_database(params, db_info)
 
     metric_tracker = setup_and_train(
         training_modules=training_modules,
@@ -418,7 +439,7 @@ def path_handler(
             "n_atom_layers"].
 
     Raises:
-        Exception: anything that indicates the model should be rerun
+        Exception: anything that indicates the model should be retrained
 
     Returns:
         dict: finished results
@@ -436,7 +457,7 @@ def path_handler(
     if not os.path.exists(dir_name):
         os.mkdir(dir_name)
     # if folder already exist and retraining is not enforced
-    elif not params.rerun:
+    elif not (params.retrain or params.reload):
         try:
             with open(dir_name + "/training_summary.json", "r") as out:
                 tmp = json.load(out)
@@ -480,13 +501,14 @@ def read_list(input_str: str):
 
 def read_args(
     tag="test",
-    gpu=0,
+    device=0,
     interactive=False,
     noprogress=False,
     custom_kernel=False,
     handle_work_dir=False,
     work_dir="test",
-    rerun=True,
+    retrain=True,
+    reload=False,
     n_states=5,
     n_atoms=6,
     training_targets=["energy", "dipole", "nacr"],
@@ -537,7 +559,9 @@ def read_args(
 
     # global settings of the task
     parser.add_argument("--tag", type=str, default=tag, help="name for run")
-    parser.add_argument("--gpu", type=int, default=gpu, help="which GPU to run on")
+    parser.add_argument(
+        "--device", type=int, default=device, help="which device to run on"
+    )
     parser.add_argument(
         "-i",
         "--interactive",
@@ -575,10 +599,16 @@ def read_args(
         ),
     )
     parser.add_argument(
-        "--rerun",
+        "--retrain",
         action="store_false",
-        default=rerun,
+        default=retrain,
         help="retrain the model if the argument and path to the model exist",
+    )
+    parser.add_argument(
+        "--reload",
+        action="store_true",
+        default=reload,
+        help="reload previous model to continue training",
     )
     parser.add_argument(
         "--n-states",
@@ -745,7 +775,7 @@ def read_args(
     )
     parser.add_argument(
         "--termination-patience",
-        type=str,
+        type=int,
         default=termination_patience,
         help="number of plateau epochs before early stopping the training process",
     )
@@ -780,17 +810,17 @@ if __name__ == "__main__":
         log_file, "wt"
     ) if interactive else contextlib.redirect_stdout(open(log_file, "w")):
         # FIXME: as soon as hippynn is imported, this block won't work
-        # if gpu != 1
-        if params.gpu:
+        # if device != 1
+        if params.device and params.device != "cpu":
             print("Check CUDA device settings")
             # set GPU order
             os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-            # if "CUDA_VISIBLE_DEVICES" is not set or different from params.gpu
-            if os.environ.get("CUDA_VISIBLE_DEVICES") != str(params.gpu):
+            # if "CUDA_VISIBLE_DEVICES" is not set or different from params.device
+            if os.environ.get("CUDA_VISIBLE_DEVICES") != str(params.device):
                 # set correct environmental variable
-                os.environ["CUDA_VISIBLE_DEVICES"] = str(params.gpu)
-                print(f'Set "CUDA_VISIBLE_DEVICES"]" to {params.gpu}')
-            # only GPU #params.gpu will be visible now, so set the value to 0
-            params.gpu = 0
+                os.environ["CUDA_VISIBLE_DEVICES"] = str(params.device)
+                print(f'Set "CUDA_VISIBLE_DEVICES"]" to {params.device}')
+            # only GPU #params.device will be visible now, so set the value to 0
+            params.device = 0
         print("List of all arguments\n\n", json.dumps(asdict(params), indent=4))
         main(params)

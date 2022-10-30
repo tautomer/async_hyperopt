@@ -1,19 +1,29 @@
 #!/vast/home/lix/.conda/envs/hippynn/bin/python3.10 -u
-# SBATCH --time=2-00:00:00
-# SBATCH --nodes=1
-# SBATCH --ntasks=40
-# SBATCH --mail-type=all
-# SBATCH -p ml4chem
-# SBATCH -J hyperopt
-# SBATCH --qos=long
-# SBATCH -o run.log
+# fmt: off
+#SBATCH --time=2-00:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=40
+#SBATCH --mail-type=all
+#SBATCH -p ml4chem
+#SBATCH -J hyperopt
+#SBATCH --qos=long
+#SBATCH -o run.log
+# black always format pure comments as of now
+# add some codes here to keep SLURM derivatives valid
+import os
+import sys
+
+# SLURM copies the script to a tmp folder
+# so to find the local package `training` we need add cwd to path
+# per https://stackoverflow.com/a/39574373/7066315
+sys.path.append(os.getcwd())
+# fmt: on
 """
     B-Opt tuning for HIPNN using AX.
 
 """
 
 import contextlib
-import os
 
 import numpy as np
 import ray
@@ -44,10 +54,13 @@ def evaluate(parameter):
         # initialize and override parameters
         params = read_args(
             noprogress=True,
-            training_targets=["energy"],
+            # training_targets=["energy"],
             init_batch_size=512,
-            max_epochs=1,
-            n_states=1,
+            raise_batch_patience=40,
+            termination_patience=150,
+            max_batch_size=4096,
+            max_epochs=8001,
+            n_states=5,
             bypass_cli_args=True,
             **parameter
         )
@@ -91,7 +104,7 @@ class AxLogger(LoggerCallback):
 if __name__ == "__main__":
     os.chdir("/projects/ml4chem/xinyang/ethene_with_nacr/")
     # TODO: better way to handle restarting of searches
-    restart = False
+    restart = True
     if restart:
         ax_client = AxClient.load_from_json_file(filepath="hyperopt_ray.json")
     else:
@@ -106,19 +119,19 @@ if __name__ == "__main__":
                     "name": "lower_cutoff",
                     "type": "range",
                     "value_type": "float",
-                    "bounds": [0.5, 1.5],
+                    "bounds": [0.2, 1.25],
                 },
                 {
                     "name": "upper_cutoff",
                     "type": "range",
                     "value_type": "float",
-                    "bounds": [3.0, 20.0],
+                    "bounds": [3.0, 10.0],
                 },
                 {
                     "name": "cutoff_distance",
                     "type": "range",
                     "value_type": "float",
-                    "bounds": [5.0, 40.0],
+                    "bounds": [5.0, 25.0],
                 },
                 {
                     "name": "n_sensitivities",
