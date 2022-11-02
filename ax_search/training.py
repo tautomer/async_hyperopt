@@ -13,7 +13,7 @@ import numpy as np
 import torch
 from hippynn import plotting
 from hippynn.additional import MAEPhaseLoss, MSEPhaseLoss, NACRNode
-from hippynn.experiment import setup_and_train
+from hippynn.experiment import setup_training, train_model
 from hippynn.experiment.controllers import PatienceController, RaiseBatchSizeOnPlateau
 from hippynn.experiment.serialization import load_checkpoint_from_cwd
 from hippynn.graphs import inputs, loss, networks, physics, targets
@@ -44,6 +44,9 @@ class ArgsList:
     noprogress: bool
     custom_kernel: bool
     handle_work_dir: bool
+    db_to_gpu: bool
+    map_devices: bool
+    update_parameters: bool
     work_dir: str
     retrain: bool
     reload: bool
@@ -255,9 +258,11 @@ def build_loss(training_targets: dict, network: networks.Hipnn):
             total_loss += target_loss
     # l2 regularization
     l2_reg = loss.l2reg(network)
+    validation_losses["L2"] = l2_reg
     # TODO: this pre-factor should be a variable
     loss_regularization = 2e-6 * l2_reg
     # add total loss to the dictionary
+    validation_losses["Loss_wo_L2"] = total_loss
     validation_losses["Loss"] = total_loss + loss_regularization
     training_targets["Losses"] = validation_losses
     return training_targets
@@ -296,7 +301,7 @@ def setup_experiment(losses: dict, plotter: plotting.PlotMaker, params: ArgsList
         plot_maker=plotter,
     )
     # Parameters describing the training procedure.
-    optimizer = torch.optim.Adam(
+    optimizer = torch.optim.AdamW(
         training_modules.model.parameters(), lr=params.init_learning_rate
     )
     batch_size = params.max_batch_size
@@ -334,18 +339,25 @@ def load_database(params: ArgsList, db_info: dict):
         seed=params.seed,  # Random seed for splitting data
         **db_info,  # Adds the inputs and targets db_names from the model as things to load
     )
-    database.send_to_device(params.device)
+    if params.db_to_gpu:
+        database.send_to_device(params.device)
     return database
 
 
-def reload_model(dev: Union[int, str], mapping=None):
-    checkpoint = load_checkpoint_from_cwd(map_location=mapping)
+def reload_checkpoint(params: ArgsList, model_device=None):
+    checkpoint = load_checkpoint_from_cwd(model_device=model_device)
     training_modules = checkpoint["training_modules"]
     controller = checkpoint["controller"]
     database = checkpoint["database"]
     metric_tracker = checkpoint["metric_tracker"]
-    experiment_params = setup_parameters(controller, dev)
-    return training_modules, database, experiment_params, controller, metric_tracker
+    if params.db_to_gpu:
+        database.send_to_device(params.device)
+    if params.update_parameters:
+        controller.patience = params.termination_patience
+        controller.scheduler.inner.patience = params.raise_batch_patience
+        controller.batch_size = params.init_batch_size
+        controller.scheduler.max_batch_size = params.max_batch_size
+    return training_modules, controller, database, metric_tracker
 
 
 def main(params: ArgsList):
@@ -362,7 +374,7 @@ def main(params: ArgsList):
     if params.noprogress:
         hippynn.settings.PROGRESS = None
     hippynn.custom_kernels.set_custom_kernels(params.custom_kernel)
-    hippynn.settings.WARN_LOW_DISTANCES = False
+    hippynn.settings.WARN_LOW_DISTANCES = True
     hippynn.settings.TRANSPARENT_PLOT = True
 
     # Hyperparameters for the network
@@ -381,8 +393,12 @@ def main(params: ArgsList):
     print("Network parameters\n\n", json.dumps(network_params, indent=4))
 
     if params.reload:
-        training_modules, database, experiment_params, _, _ = reload_model(
-            params.device
+        if params.map_devices:
+            model_device = params.device
+        else:
+            model_device = None
+        training_modules, controller, database, metric_tracker = reload_checkpoint(
+            params, model_device
         )
     else:
         _, positions, network = build_network(network_params)
@@ -393,16 +409,23 @@ def main(params: ArgsList):
         else:
             plotter = None
         training_targets = build_loss(training_targets, network)
-        print(training_targets["Losses"].keys())
         training_modules, db_info, experiment_params = setup_experiment(
             training_targets["Losses"], plotter, params
         )
         database = load_database(params, db_info)
 
-    metric_tracker = setup_and_train(
-        training_modules=training_modules,
-        database=database,
-        setup_params=experiment_params,
+        training_modules, controller, metric_tracker = setup_training(
+            training_modules=training_modules,
+            setup_params=experiment_params,
+        )
+
+    metric_tracker = train_model(
+        training_modules,
+        database,
+        controller,
+        metric_tracker,
+        callbacks=None,
+        batch_callbacks=None,
     )
 
     del network_params["possible_species"]
@@ -444,12 +467,17 @@ def path_handler(
     Returns:
         dict: finished results
     """
+    if not os.path.exists(params.work_dir):
+        if not params.handle_work_dir and params.reload:
+            raise FileNotFoundError(f"Path '{dir_name}' does not exist.")
+        os.mkdir(params.work_dir)
+    os.chdir(params.work_dir)
+    if not params.handle_work_dir and params.reload:
+        print(os.getcwd(), "asdasdasda")
+        return
     dir_name = params.tag
     for i in naming:
         dir_name += f"_{getattr(params, i)}"
-    if not os.path.exists(params.work_dir):
-        os.mkdir(params.work_dir)
-    os.chdir(params.work_dir)
     # keep a note on the name of current running model
     with open("folder", "w") as f:
         print(dir_name, file=f)
@@ -457,7 +485,7 @@ def path_handler(
     if not os.path.exists(dir_name):
         os.mkdir(dir_name)
     # if folder already exist and retraining is not enforced
-    elif not (params.retrain or params.reload):
+    elif not params.retrain:
         try:
             with open(dir_name + "/training_summary.json", "r") as out:
                 tmp = json.load(out)
@@ -506,6 +534,9 @@ def read_args(
     noprogress=False,
     custom_kernel=False,
     handle_work_dir=False,
+    db_to_gpu=False,
+    map_devices=False,
+    update_parameters=False,
     work_dir="test",
     retrain=True,
     reload=False,
@@ -589,13 +620,37 @@ def read_args(
         help="the script will handle the working directory if the argument exists",
     )
     parser.add_argument(
+        "--db-to-gpu",
+        action="store_true",
+        default=db_to_gpu,
+        help="transfer the whole database to GPU or not",
+    )
+    parser.add_argument(
+        "-m",
+        "--map-devices",
+        action="store_true",
+        default=map_devices,
+        help="enable cross-device restart or not",
+    )
+    parser.add_argument(
+        "--update-parameters",
+        action="store_true",
+        default=update_parameters,
+        help=(
+            "update some parameters based on current settings\n"
+            "currently support batch size and patience parameters"
+        ),
+    )
+    parser.add_argument(
         "--work-dir",
         type=str,
         default=work_dir,
         help=(
             "root directory for all tests\n"
             "each test will have its own subfolder\n"
-            "only works when handle_work_dir=True"
+            "only works if handle_work_dir=True or reload=True\n"
+            "when handle_work_dir=False and reload=True, the path will be used to"
+            "reload the model"
         ),
     )
     parser.add_argument(
@@ -789,13 +844,14 @@ def read_args(
 if __name__ == "__main__":
     params = read_args(
         handle_work_dir=True,
+        db_to_gpu=True,
         n_states=5,
         upper_cutoff=10,
         init_batch_size=512,
         split_ratio=[0.3, 0.2],
     )
     # check/create path
-    if params.handle_work_dir:
+    if params.handle_work_dir or params.reload:
         results = path_handler(params)
         if results:
             print(json.dumps(results, indent=4))
@@ -809,6 +865,8 @@ if __name__ == "__main__":
     with hippynn.tools.log_terminal(
         log_file, "wt"
     ) if interactive else contextlib.redirect_stdout(open(log_file, "w")):
+        """
+        # As of now, this will only work if custom kenels are disabled in bash
         # FIXME: as soon as hippynn is imported, this block won't work
         # if device != 1
         if params.device and params.device != "cpu":
@@ -822,5 +880,6 @@ if __name__ == "__main__":
                 print(f'Set "CUDA_VISIBLE_DEVICES"]" to {params.device}')
             # only GPU #params.device will be visible now, so set the value to 0
             params.device = 0
+        """
         print("List of all arguments\n\n", json.dumps(asdict(params), indent=4))
         main(params)
