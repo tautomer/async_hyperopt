@@ -5,7 +5,7 @@
 #SBATCH --ntasks=40
 #SBATCH --mail-type=all
 #SBATCH -p ml4chem
-#SBATCH -J hyperopt
+#SBATCH -J parallel_hyperopt
 #SBATCH --qos=long
 #SBATCH -o run.log
 # black always format pure comments as of now
@@ -24,6 +24,7 @@ sys.path.append(os.getcwd())
 """
 
 import contextlib
+import shutil
 
 import numpy as np
 import ray
@@ -56,19 +57,22 @@ def evaluate(parameter):
             noprogress=True,
             # training_targets=["energy"],
             init_batch_size=512,
-            raise_batch_patience=40,
-            termination_patience=150,
+            raise_batch_patience=60,
+            termination_patience=200,
             max_batch_size=4096,
             max_epochs=8001,
             n_states=5,
             bypass_cli_args=True,
-            **parameter
+            init_learning_rate=1e-2,
+            **parameter,
         )
         # train model
-        with open(params.log_filename, "w") as log_file:
-            with contextlib.redirect_stdout(log_file):
-                out = main(params)
+        with contextlib.redirect_stdout(open(params.log_filename, "w")):
+            out = main(params)
+        print(f"returned loss is {out['Loss']}. cwd is {os.getcwd()}")
+
     except Exception as e:
+        print("Error encountered")
         if hasattr(e, "output"):
             print(e.output)
         else:
@@ -79,7 +83,7 @@ def evaluate(parameter):
 
 
 class AxLogger(LoggerCallback):
-    def __init__(self, ax_client, flnm):
+    def __init__(self, ax_client: AxClient, flnm: str):
         """
         A logger callback to save the progress to json file after every trial ends.
         Similar to running `ax_client.save_to_json_file` every iteration in sequential
@@ -95,7 +99,11 @@ class AxLogger(LoggerCallback):
         self.count = 0
 
     def log_trial_end(self, trial: "Trial", failed: bool = False):
+        shutil.copy(self.flnm, f"{self.flnm}.bk")
+        shutil.copy("hyperopt.csv", "hyperopt.csv.bk")
         self.ax_client.save_to_json_file(filepath=self.flnm)
+        data_frame = self.ax_client.get_trials_data_frame().sort_values("Loss")
+        data_frame.to_csv("hyperopt.csv", header=True)
         self.count += 1
         print("Ax saved", self.count)
 
@@ -104,7 +112,7 @@ class AxLogger(LoggerCallback):
 if __name__ == "__main__":
     os.chdir("/projects/ml4chem/xinyang/ethene_with_nacr/")
     # TODO: better way to handle restarting of searches
-    restart = True
+    restart = False
     if restart:
         ax_client = AxClient.load_from_json_file(filepath="hyperopt_ray.json")
     else:
@@ -119,19 +127,19 @@ if __name__ == "__main__":
                     "name": "lower_cutoff",
                     "type": "range",
                     "value_type": "float",
-                    "bounds": [0.2, 1.25],
+                    "bounds": [0.5, 0.95],
                 },
                 {
                     "name": "upper_cutoff",
                     "type": "range",
                     "value_type": "float",
-                    "bounds": [3.0, 10.0],
+                    "bounds": [2.5, 3.0],
                 },
                 {
                     "name": "cutoff_distance",
                     "type": "range",
                     "value_type": "float",
-                    "bounds": [5.0, 25.0],
+                    "bounds": [3.5, 5.0],
                 },
                 {
                     "name": "n_sensitivities",
@@ -147,22 +155,21 @@ if __name__ == "__main__":
                 },
                 {
                     "name": "n_interactions",
-                    "type": "range",
+                    "type": "fixed",
                     "value_type": "int",
-                    "bounds": [1, 3],
+                    "value": 1,
                 },
                 {
                     "name": "n_atom_layers",
-                    "type": "range",
-                    "value_type": "int",
-                    "bounds": [1, 3],
+                    "type": "choice",
+                    "values": [2, 3, 4],
                 },
             ],
             objectives={
                 "Loss": ObjectiveProperties(minimize=True),
             },
             overwrite_existing_experiment=True,
-            is_test=True,
+            is_test=False,
             parameter_constraints=[
                 "lower_cutoff <= upper_cutoff",
                 "upper_cutoff <= cutoff_distance",
@@ -175,9 +182,9 @@ if __name__ == "__main__":
     ax_logger = AxLogger(ax_client, "hyperopt_ray.json")
     tune.run(
         evaluate,
-        num_samples=10,
+        num_samples=40,
         search_alg=algo,
-        verbose=1,
+        verbose=0,
         # TODO: how to checkpoint?
         checkpoint_freq=2,
         # use one GPU per trial
