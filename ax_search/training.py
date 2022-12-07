@@ -12,7 +12,7 @@ import matplotlib
 import numpy as np
 import torch
 from hippynn import plotting
-from hippynn.additional import MAEPhaseLoss, MSEPhaseLoss, NACRNode
+from hippynn.additional import MAEPhaseLoss, MSEPhaseLoss, NACRNode, NACRMultiStateNode
 from hippynn.experiment import setup_training, train_model
 from hippynn.experiment.controllers import PatienceController, RaiseBatchSizeOnPlateau
 from hippynn.experiment.serialization import load_checkpoint_from_cwd
@@ -54,6 +54,7 @@ class ArgsList:
     n_atoms: int
     training_targets: list
     no_reuse_charges: bool
+    multi_targets: bool
     log_filename: str
     possible_species: list
     n_interactions: int
@@ -88,12 +89,21 @@ def build_network(network_params: dict):
     return species, positions, network
 
 
-def energy_target(n_states: int, network: networks.Hipnn):
+def energy_target(n_states: int, network: networks.Hipnn, multi_targets=False):
     outputs = []
     energy_nodes = []
-    for i in range(n_states):
-        name = f"E{i+1}"
-        energy = targets.HEnergyNode(f"HEnergy{i+1}", network)
+    if multi_targets:
+        n = 1
+    else:
+        n = n_states
+    for i in range(n):
+        if multi_targets:
+            name = "E"
+            module_kwargs = {"n_target": n_states}
+        else:
+            name = f"E{i + 1}"
+            module_kwargs = None
+        energy = targets.HEnergyNode(name, network, module_kwargs=module_kwargs)
         # actual training target should be the main output, i.e., mol_energy
         mol_energy = energy.mol_energy
         mol_energy.db_name = name
@@ -112,15 +122,31 @@ def energy_target(n_states: int, network: networks.Hipnn):
 
 
 def dipole_target(
-    n_states: int, network: networks.Hipnn, positions: inputs.PositionsNode
+    n_states: int,
+    network: networks.Hipnn,
+    positions: inputs.PositionsNode,
+    multi_targets=False,
 ):
     outputs = []
     charge_nodes = []
-    for i in range(n_states):
-        name = f"D{i+1}"
+    if multi_targets:
+        n = 1
+    else:
+        n = n_states
+    for i in range(n):
+        if multi_targets:
+            charge_name = "Q"
+            dipole_name = "D"
+            module_kwargs = {"n_target": n_states}
+        else:
+            charge_name = f"Q{i + 1}"
+            dipole_name = f"D{i + 1}"
+            module_kwargs = None
         # obtain dipole from charges * positions
-        charge = targets.HChargeNode(f"HCharge{i+1}", network)
-        dipole = physics.DipoleNode(name, (charge, positions), db_name=name)
+        charge = targets.HChargeNode(charge_name, network, module_kwargs=module_kwargs)
+        dipole = physics.DipoleNode(
+            dipole_name, (charge, positions), db_name=dipole_name
+        )
         charge_nodes.append(charge)
         outputs.append(dipole)
     # output dictionary
@@ -141,6 +167,7 @@ def nacr_target(
     n_atoms: int,
     network: networks.Hipnn,
     positions: inputs.PositionsNode,
+    multi_targets=False,
     no_reuse_charges=False,
 ):
     training_targets["nacr"] = {
@@ -149,13 +176,19 @@ def nacr_target(
         "norm": np.sqrt(n_atoms * 3),
         "loss_weight": 1.0,
     }
-    outputs = []
     # build the charge_nodes if dipole is not a target
     if "dipole" not in training_targets or no_reuse_charges:
         print("Create a new set of charge nodes for NACR predictions")
-        charge_nodes = []
-        for i in range(n_states):
-            charge_nodes.append(targets.HChargeNode(f"HCharge{i+1}", network))
+        if multi_targets:
+            charge_nodes = [
+                targets.HChargeNode(
+                    "Charge", network, module_kwargs={"n_target": n_states}
+                )
+            ]
+        else:
+            charge_nodes = []
+            for i in range(n_states):
+                charge_nodes.append(targets.HChargeNode(f"HCharge{i+1}", network))
         training_targets["nacr"]["charge_nodes"] = charge_nodes
     # otherwise take it from dipole's dictionary
     else:
@@ -164,16 +197,27 @@ def nacr_target(
         training_targets["nacr"]["charge_nodes"] = charge_nodes
     # obtain the energy nodes from energy's dictionary
     energy_nodes = training_targets["energy"]["energy_nodes"]
-    for i in range(n_states):
-        # energy nodes and dipole nodes can directly be reused here
-        q_i = charge_nodes[i]
-        e_i = energy_nodes[i]
-        for j in range(i + 1, n_states):
-            q_j = charge_nodes[j]
-            e_j = energy_nodes[j]
-            name = f"ScaledNACR_{i+1}_{j+1}"
-            nacr = NACRNode(name, (q_i, q_j, positions, e_i, e_j), db_name=name)
-            outputs.append(nacr)
+    if multi_targets:
+        name = "ScaledNACR"
+        nacr = NACRMultiStateNode(
+            name,
+            (charge_nodes[0], positions, energy_nodes[0]),
+            db_name=name,
+            module_kwargs={"n_target": n_states},
+        )
+        outputs = [nacr]
+    else:
+        outputs = []
+        for i in range(n_states):
+            # energy nodes and dipole nodes can directly be reused here
+            q_i = charge_nodes[i]
+            e_i = energy_nodes[i]
+            for j in range(i + 1, n_states):
+                q_j = charge_nodes[j]
+                e_j = energy_nodes[j]
+                name = f"ScaledNACR_{i+1}_{j+1}"
+                nacr = NACRNode(name, (q_i, q_j, positions, e_i, e_j), db_name=name)
+                outputs.append(nacr)
     training_targets["nacr"]["outputs"] = outputs
     return training_targets
 
@@ -185,7 +229,8 @@ def build_output_layer(
     training_targets = {}
     train_nacr = False
     # sort the targets so energy or dipole should show up before nacr if exists
-    for t in sorted(params.training_targets):
+    params.training_targets = sorted(params.training_targets)
+    for t in params.training_targets:
         # normalize all letters in the targets to lower case
         t = t.lower()
         # NACR need to be treated separately
@@ -199,9 +244,13 @@ def build_output_layer(
         # add other targets to the dictionary directly
         else:
             if t == "energy":
-                training_targets[t] = energy_target(n_states, network)
+                training_targets[t] = energy_target(
+                    n_states, network, params.multi_targets
+                )
             elif t == "dipole":
-                training_targets[t] = dipole_target(n_states, network, positions)
+                training_targets[t] = dipole_target(
+                    n_states, network, positions, params.multi_targets
+                )
             else:
                 print(f"Unknown target {t}")
 
@@ -215,6 +264,7 @@ def build_output_layer(
             params.n_atoms,
             network,
             positions,
+            params.multi_targets,
             params.no_reuse_charges,
         )
     return training_targets
@@ -295,6 +345,7 @@ def setup_parameters(controller: PatienceController, dev: Union[int, str]):
 
 def setup_experiment(losses: dict, plotter: plotting.PlotMaker, params: ArgsList):
     # Assemble Pytorch Model that's actually trained.
+    print(losses.keys())
     training_modules, db_info = hippynn.experiment.assemble_for_training(
         losses["Loss"],
         losses,
@@ -328,18 +379,48 @@ def setup_experiment(losses: dict, plotter: plotting.PlotMaker, params: ArgsList
     return training_modules, db_info, experiment_params
 
 
-def load_database(params: ArgsList, db_info: dict):
+def load_database(params: ArgsList, db_info: dict, multi_targets=False, n_states=None):
     database = hippynn.databases.DirectoryDatabase(
         name=params.dataset_name,  # Prefix for arrays in the directory
         directory=params.dataset_location,
-        test_size=params.split_ratio[0],  # Fraction or number of samples to test on.
-        valid_size=params.split_ratio[
-            1
-        ],  # Fraction or number of samples to validate on
         seed=params.seed,  # Random seed for splitting data
         **db_info,  # Adds the inputs and targets db_names from the model as things to load
     )
-    if params.db_to_gpu:
+    if multi_targets:
+        if not n_states:
+            print(
+                "The number of states is not provided. All 'columns' in the dataset"
+                " will be used."
+            )
+        else:
+            arrays = database.arr_dict
+            for k in db_info["targets"]:
+                v = arrays[k]
+                if k == "Z":
+                    continue
+                n_columns = v.shape[-1]
+                if "NACR" in k.upper():
+                    columns_expected = n_states * (n_states - 1) // 2
+                else:
+                    columns_expected = n_states
+                if n_columns < columns_expected:
+                    raise ValueError(
+                        "The number of states included in training is larger than that"
+                        " in the dataset."
+                    )
+                elif n_columns > columns_expected:
+                    if "NACR" in k.upper():
+                        m = int((np.sqrt(8 * n_columns + 1) + 1) / 2)
+                        idx_orig = list(zip(*np.triu_indices(m, k=1)))
+                        idx_new = list(zip(*np.triu_indices(n_states, k=1)))
+                        slices = np.isin(idx_orig, idx_new).all(axis=1)
+                        arrays[k] = v[..., slices]
+                    else:
+                        arrays[k] = v[..., :columns_expected]
+
+    # raise RuntimeError(db_info, database.arr_dict["D"].shape)
+    database.make_trainvalidtest_split(*params.split_ratio)
+    if params.db_to_gpu and torch.cuda.is_available():
         database.send_to_device(params.device)
     return database
 
@@ -412,7 +493,12 @@ def main(params: ArgsList):
         training_modules, db_info, experiment_params = setup_experiment(
             training_targets["Losses"], plotter, params
         )
-        database = load_database(params, db_info)
+        database = load_database(
+            params,
+            db_info,
+            multi_targets=params.multi_targets,
+            n_states=params.n_states,
+        )
 
         training_modules, controller, metric_tracker = setup_training(
             training_modules=training_modules,
@@ -472,8 +558,7 @@ def path_handler(
             raise FileNotFoundError(f"Path '{dir_name}' does not exist.")
         os.mkdir(params.work_dir)
     os.chdir(params.work_dir)
-    if not params.handle_work_dir and params.reload:
-        print(os.getcwd(), "asdasdasda")
+    if (not params.handle_work_dir) and params.reload:
         return
     dir_name = params.tag
     for i in naming:
@@ -544,6 +629,7 @@ def read_args(
     n_atoms=6,
     training_targets=["energy", "dipole", "nacr"],
     no_reuse_charges=False,
+    multi_targets=False,
     log_filename="training_log.txt",
     possible_species=[0, 1, 6],
     n_interactions=3,
@@ -692,6 +778,12 @@ def read_args(
         action="store_true",
         default=no_reuse_charges,
         help="whether to generate a set of chargers for NACR",
+    )
+    parser.add_argument(
+        "--multi-targets",
+        action="store_true",
+        default=multi_targets,
+        help="whether to use one node to predict multiple states",
     )
     parser.add_argument(
         "--log-filename",
@@ -843,7 +935,6 @@ def read_args(
 
 if __name__ == "__main__":
     params = read_args(
-        handle_work_dir=True,
         db_to_gpu=True,
         n_states=5,
         upper_cutoff=10,
@@ -864,7 +955,7 @@ if __name__ == "__main__":
     # to avoid a huge SLURM log file if many searches are performed
     with hippynn.tools.log_terminal(
         log_file, "wt"
-    ) if interactive else contextlib.redirect_stdout(open(log_file, "w")):
+    ) if interactive else contextlib.redirect_stdout(open(log_file, "a+")):
         """
         # As of now, this will only work if custom kenels are disabled in bash
         # FIXME: as soon as hippynn is imported, this block won't work
