@@ -55,15 +55,16 @@ def evaluate(parameter):
         # initialize and override parameters
         params = read_args(
             noprogress=True,
+            multi_targets=True,
             # training_targets=["energy"],
-            init_batch_size=512,
-            raise_batch_patience=60,
-            termination_patience=200,
+            init_batch_size=32,
+            raise_batch_patience=50,
+            termination_patience=100,
             max_batch_size=4096,
             max_epochs=8001,
             n_states=5,
             bypass_cli_args=True,
-            init_learning_rate=1e-2,
+            init_learning_rate=5e-4,
             **parameter,
         )
         # train model
@@ -99,8 +100,9 @@ class AxLogger(LoggerCallback):
         self.count = 0
 
     def log_trial_end(self, trial: "Trial", failed: bool = False):
-        shutil.copy(self.flnm, f"{self.flnm}.bk")
-        shutil.copy("hyperopt.csv", "hyperopt.csv.bk")
+        if self.count > 0:
+            shutil.copy(self.flnm, f"{self.flnm}.bk")
+            shutil.copy("hyperopt.csv", "hyperopt.csv.bk")
         self.ax_client.save_to_json_file(filepath=self.flnm)
         data_frame = self.ax_client.get_trials_data_frame().sort_values("Loss")
         data_frame.to_csv("hyperopt.csv", header=True)
@@ -133,13 +135,13 @@ if __name__ == "__main__":
                     "name": "upper_cutoff",
                     "type": "range",
                     "value_type": "float",
-                    "bounds": [2.5, 3.0],
+                    "bounds": [4.5, 7.0],
                 },
                 {
                     "name": "cutoff_distance",
                     "type": "range",
                     "value_type": "float",
-                    "bounds": [3.5, 5.0],
+                    "bounds": [5.5, 10.0],
                 },
                 {
                     "name": "n_sensitivities",
@@ -151,18 +153,19 @@ if __name__ == "__main__":
                     "name": "n_features",
                     "type": "range",
                     "value_type": "int",
-                    "bounds": [2, 15],
+                    "bounds": [2, 20],
                 },
                 {
                     "name": "n_interactions",
-                    "type": "fixed",
+                    # "type": "fixed",
+                    "type": "choice",
                     "value_type": "int",
-                    "value": 1,
+                    "values": [2, 3],
                 },
                 {
                     "name": "n_atom_layers",
                     "type": "choice",
-                    "values": [2, 3, 4],
+                    "values": [2, 3],
                 },
             ],
             objectives={
