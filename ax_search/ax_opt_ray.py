@@ -1,10 +1,11 @@
-#!/vast/home/lix/.conda/envs/hippynn/bin/python3.10 -u
+#!/users/lix/miniconda3/envs/hippynn/bin/python3 -u
 # fmt: off
-#SBATCH --time=2-00:00:00
+##SBATCH --time=16:00:00
+#SBATCH --time=4-00:00:00
 #SBATCH --nodes=1
-#SBATCH --ntasks=40
+#SBATCH --ntasks=64
 #SBATCH --mail-type=all
-#SBATCH -p ml4chem
+#SBATCH -p gpu -A w23_mlqed_g
 #SBATCH -J parallel_hyperopt
 #SBATCH --qos=long
 #SBATCH -o run.log
@@ -19,18 +20,23 @@ import sys
 sys.path.append(os.getcwd())
 # fmt: on
 """
-    B-Opt tuning for HIPNN using AX.
+    Hyperparameter tuning for HIPNN using AX and Ray.
 
 """
 
 import contextlib
+import gc
 import shutil
 
 import numpy as np
 import ray
+import torch
+from ax.core import Trial as AXTrial
 from ax.service.ax_client import AxClient
 from ax.service.utils.instantiation import ObjectiveProperties
-from ray import tune
+from ray import tune, air
+from ray.air import session
+from ray.tune.experiment.trial import Trial
 from ray.tune.logger import JsonLoggerCallback, LoggerCallback
 from ray.tune.search import ConcurrencyLimiter
 from ray.tune.search.ax import AxSearch
@@ -40,51 +46,44 @@ from training import main, read_args
 ray.init(runtime_env={"working_dir": "."})
 
 
-def evaluate(parameter):
+def evaluate(parameter, checkpoint_dir=None):
     """
     Evaluates a trial for MBO HIPNN.
 
     Args:
         parameter (dict): Python dictionary for trial values of HIPNN hyperparameters.
+        checkpoint_dir (str, optional): To enable checkpoints for ray. Defaults to None.
 
     Returns:
         dict : Loss metrics to be minimized.
     """
 
-    try:
-        # initialize and override parameters
-        params = read_args(
-            noprogress=True,
-            multi_targets=True,
-            # training_targets=["energy"],
-            init_batch_size=32,
-            raise_batch_patience=50,
-            termination_patience=100,
-            max_batch_size=4096,
-            max_epochs=8001,
-            n_states=5,
-            bypass_cli_args=True,
-            init_learning_rate=5e-4,
-            **parameter,
-        )
-        # train model
-        with contextlib.redirect_stdout(open(params.log_filename, "w")):
-            out = main(params)
-        print(f"returned loss is {out['Loss']}. cwd is {os.getcwd()}")
+    gc.collect()
+    torch.cuda.empty_cache()
+    # initialize and override parameters
+    params = read_args(
+        noprogress=True,
+        db_to_gpu=True,
+        training_targets=["energy"],
+        init_batch_size=32,
+        raise_batch_patience=60,
+        termination_patience=200,
+        max_batch_size=512,
+        max_epochs=8001,
+        n_states=2,
+        bypass_cli_args=True,
+        init_learning_rate=6e-5,
+        **parameter,
+    )
+    # train model
+    with contextlib.redirect_stdout(open(params.log_filename, "w")):
+        out = main(params)
 
-    except Exception as e:
-        print("Error encountered")
-        if hasattr(e, "output"):
-            print(e.output)
-        else:
-            print(e)
-        return {"Loss": np.inf}
-
-    return {"Loss": out["Loss"]}
+    session.report({"Loss": out["Loss"]})
 
 
 class AxLogger(LoggerCallback):
-    def __init__(self, ax_client: AxClient, flnm: str):
+    def __init__(self, ax_client: AxClient, json_name: str, csv_name: str):
         """
         A logger callback to save the progress to json file after every trial ends.
         Similar to running `ax_client.save_to_json_file` every iteration in sequential
@@ -92,38 +91,106 @@ class AxLogger(LoggerCallback):
 
         Args:
             ax_client (AxClient): ax client to save
-            flnm (str): name for the json file. Append a path if you want to save the \
+            json_name (str): name for the json file. Append a path if you want to save the \
                 json file to somewhere other than cwd.
+            csv_name (str): name for the csv file. Append a path if you want to save the \
+                csv file to somewhere other than cwd.
         """
         self.ax_client = ax_client
-        self.flnm = flnm
-        self.count = 0
+        self.json = json_name
+        self.csv = csv_name
 
-    def log_trial_end(self, trial: "Trial", failed: bool = False):
-        if self.count > 0:
-            shutil.copy(self.flnm, f"{self.flnm}.bk")
-            shutil.copy("hyperopt.csv", "hyperopt.csv.bk")
-        self.ax_client.save_to_json_file(filepath=self.flnm)
-        data_frame = self.ax_client.get_trials_data_frame().sort_values("Loss")
-        data_frame.to_csv("hyperopt.csv", header=True)
-        self.count += 1
-        print("Ax saved", self.count)
+    def log_trial_end(
+        self, trial: Trial, id: int, metric: float, runtime: int, failed: bool = False
+    ):
+        self.ax_client.save_to_json_file(filepath=self.json)
+        shutil.copy(self.json, f"{trial.local_dir}/{self.json}")
+        try:
+            data_frame = self.ax_client.get_trials_data_frame().sort_values("Loss")
+            data_frame.to_csv(self.csv, header=True)
+        except KeyError:
+            pass
+        shutil.copy(self.csv, f"{trial.local_dir}/{self.csv}")
+        if failed:
+            status = "failed"
+        else:
+            status = "finished"
+        print(
+            f"AX trial {id} {status}. Final loss: {metric}. Time taken"
+            f" {runtime} seconds. Location directory: {trial.logdir}."
+        )
+
+    def on_trial_error(self, iteration: int, trials: list[Trial], trial: Trial, **info):
+        id = int(trial.experiment_tag.split("_")[0]) - 1
+        ax_trial = self.ax_client.get_trial(id)
+        ax_trial.mark_abandoned(reason="Error encountered")
+        self.log_trial_end(
+            trial, id + 1, "not available", self.calculate_runtime(ax_trial), True
+        )
+
+    def on_trial_complete(
+        self, iteration: int, trials: list["Trial"], trial: Trial, **info
+    ):
+        # trial.trial_id is the random id generated by ray, not ax
+        # the default experiment_tag starts with ax' trial index
+        # but this workaround is totally fragile, as users can
+        # customize the tag or folder name
+        id = int(trial.experiment_tag.split("_")[0]) - 1
+        ax_trial = self.ax_client.get_trial(id)
+        failed = False
+        try:
+            loss = ax_trial.objective_mean
+        except ValueError:
+            failed = True
+            loss = "not available"
+        else:
+            if np.isnan(loss) or np.isinf(loss):
+                failed = True
+                loss = "not available"
+        if failed:
+            ax_trial.mark_failed()
+        self.log_trial_end(
+            trial, id + 1, loss, self.calculate_runtime(ax_trial), failed
+        )
+
+    @classmethod
+    def calculate_runtime(cls, trial: AXTrial):
+        delta = trial.time_completed - trial.time_run_started
+        return int(delta.total_seconds())
 
 
 # initialize the client and experiment.
 if __name__ == "__main__":
-    os.chdir("/projects/ml4chem/xinyang/ethene_with_nacr/")
+    os.chdir("/users/lix/scratch/prosq")
     # TODO: better way to handle restarting of searches
     restart = False
     if restart:
         ax_client = AxClient.load_from_json_file(filepath="hyperopt_ray.json")
+        # update existing experiment
+        # `immutable_search_space_and_opt_config` has to be False
+
+        # ax_client.set_search_space(
+        #     [
+        #         {
+        #             "name": "n_interactions",
+        #             "type": "fixed",
+        #             "value_type": "int",
+        #             "value": 1,
+        #         },
+        #         {
+        #             "name": "n_atom_layers",
+        #             "type": "choice",
+        #             "values": [2, 3, 4, 5, 6],
+        #         },
+        #     ]
+        # )
     else:
         ax_client = AxClient(
             verbose_logging=False,
             enforce_sequential_optimization=False,
         )
         ax_client.create_experiment(
-            name="ethene_opt",
+            name="prosq_opt",
             parameters=[
                 {
                     "name": "lower_cutoff",
@@ -135,13 +202,13 @@ if __name__ == "__main__":
                     "name": "upper_cutoff",
                     "type": "range",
                     "value_type": "float",
-                    "bounds": [4.5, 7.0],
+                    "bounds": [1.5, 10.0],
                 },
                 {
                     "name": "cutoff_distance",
                     "type": "range",
                     "value_type": "float",
-                    "bounds": [5.5, 10.0],
+                    "bounds": [3.0, 18.0],
                 },
                 {
                     "name": "n_sensitivities",
@@ -153,19 +220,18 @@ if __name__ == "__main__":
                     "name": "n_features",
                     "type": "range",
                     "value_type": "int",
-                    "bounds": [2, 20],
+                    "bounds": [10, 30],
                 },
                 {
                     "name": "n_interactions",
-                    # "type": "fixed",
-                    "type": "choice",
+                    "type": "fixed",
                     "value_type": "int",
-                    "values": [2, 3],
+                    "value": 1,
                 },
                 {
                     "name": "n_atom_layers",
                     "type": "choice",
-                    "values": [2, 3],
+                    "values": [3, 4, 5, 6],
                 },
             ],
             objectives={
@@ -173,6 +239,9 @@ if __name__ == "__main__":
             },
             overwrite_existing_experiment=True,
             is_test=False,
+            # slightly more overhead
+            # but make it possible to adjust the experiment setups
+            immutable_search_space_and_opt_config=False,
             parameter_constraints=[
                 "lower_cutoff <= upper_cutoff",
                 "upper_cutoff <= cutoff_distance",
@@ -182,21 +251,17 @@ if __name__ == "__main__":
     # run the optimization Loop.
     algo = AxSearch(ax_client=ax_client)
     algo = ConcurrencyLimiter(algo, max_concurrent=4)
-    ax_logger = AxLogger(ax_client, "hyperopt_ray.json")
-    tune.run(
-        evaluate,
-        num_samples=40,
-        search_alg=algo,
-        verbose=0,
-        # TODO: how to checkpoint?
-        checkpoint_freq=2,
-        # use one GPU per trial
-        # ray will automatically set the environment variable `CUDA_VISIBLE_DEVICES`
-        # so that only the next available GPU is exposed to torch
-        resources_per_trial={"gpu": 1},
-        # without specifying `local_dir`, the logs will be saved to ~/ray_results
-        local_dir="./test_ray",
-        callbacks=[ax_logger, JsonLoggerCallback()],
+    ax_logger = AxLogger(ax_client, "hyperopt_ray.json", "hyperopt.csv")
+    tuner = tune.Tuner(
+        tune.with_resources(evaluate, resources={"gpu": 1}),
+        tune_config=tune.TuneConfig(search_alg=algo, num_samples=40),
+        run_config=air.RunConfig(
+            local_dir="./test_ray",
+            verbose=0,
+            callbacks=[ax_logger, JsonLoggerCallback()],
+            log_to_file=True,
+        ),
     )
+    tuner.fit()
 
     print("Script done.")
