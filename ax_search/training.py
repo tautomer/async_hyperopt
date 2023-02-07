@@ -89,19 +89,31 @@ def build_network(network_params: dict):
     return species, positions, network
 
 
-def energy_target(n_states: int, network: networks.Hipnn, multi_targets=False):
+def energy_target(
+    n_states: int,
+    network: networks.Hipnn,
+    multi_targets=False,
+    include_ground_state=True,
+):
     outputs = []
     energy_nodes = []
+    n_states += 1
+    if include_ground_state:
+        first = 0
+    else:
+        first = 1
     if multi_targets:
-        n = 1
+        # n = 1
+        n = first + 1
     else:
         n = n_states
-    for i in range(n):
+    # for i in range(n):
+    for i in range(first, n):
         if multi_targets:
             name = "E"
             module_kwargs = {"n_target": n_states}
         else:
-            name = f"E{i + 1}"
+            name = f"E{i}"
             module_kwargs = None
         energy = targets.HEnergyNode(name, network, module_kwargs=module_kwargs)
         # actual training target should be the main output, i.e., mol_energy
@@ -114,7 +126,7 @@ def energy_target(n_states: int, network: networks.Hipnn, multi_targets=False):
         "mse_loss_func": loss.MSELoss,
         "mae_loss_func": loss.MAELoss,
         "norm": 1,
-        "loss_weight": 0.1,
+        "loss_weight": 1,
         "outputs": outputs,
         "energy_nodes": energy_nodes,
     }
@@ -294,8 +306,9 @@ def build_loss(training_targets: dict, network: networks.Hipnn):
             else:
                 target_rmse += rmse
                 target_mae += mae
-        validation_losses[f"{k.upper()}-RMSE"] = target_rmse
-        validation_losses[f"{k.upper()}-MAE"] = target_mae
+        if len(outputs) > 1:
+            validation_losses[f"{k.upper()}-RMSE"] = target_rmse
+            validation_losses[f"{k.upper()}-MAE"] = target_mae
         if norm != 1.0:
             target_rmse /= norm
         target_loss = target_rmse + target_mae
@@ -310,7 +323,7 @@ def build_loss(training_targets: dict, network: networks.Hipnn):
     l2_reg = loss.l2reg(network)
     validation_losses["L2"] = l2_reg
     # TODO: this pre-factor should be a variable
-    loss_regularization = 2e-6 * l2_reg
+    loss_regularization = 2e-5 * l2_reg
     # add total loss to the dictionary
     validation_losses["Loss_wo_L2"] = total_loss
     validation_losses["Loss"] = total_loss + loss_regularization
@@ -386,6 +399,7 @@ def load_database(params: ArgsList, db_info: dict, multi_targets=False, n_states
         seed=params.seed,  # Random seed for splitting data
         **db_info,  # Adds the inputs and targets db_names from the model as things to load
     )
+    arrays = database.arr_dict
     if multi_targets:
         if not n_states:
             print(
@@ -393,7 +407,6 @@ def load_database(params: ArgsList, db_info: dict, multi_targets=False, n_states
                 " will be used."
             )
         else:
-            arrays = database.arr_dict
             for k in db_info["targets"]:
                 v = arrays[k]
                 if k == "Z":
@@ -419,6 +432,11 @@ def load_database(params: ArgsList, db_info: dict, multi_targets=False, n_states
                         arrays[k] = v[..., :columns_expected]
 
     # raise RuntimeError(db_info, database.arr_dict["D"].shape)
+    for _, v in db_info.items():
+        for k in v:
+            arrays[k] = arrays[k][:100000]
+    arrays["indices"] = arrays["indices"][:100000]
+
     database.make_trainvalidtest_split(*params.split_ratio)
     if params.db_to_gpu and torch.cuda.is_available():
         database.send_to_device(params.device)
@@ -625,13 +643,13 @@ def read_args(
     work_dir="test",
     retrain=True,
     reload=False,
-    n_states=5,
-    n_atoms=6,
-    training_targets=["energy", "dipole", "nacr"],
+    n_states=2,
+    n_atoms=58,
+    training_targets=["energy", "dipole"],
     no_reuse_charges=False,
     multi_targets=False,
     log_filename="training_log.txt",
-    possible_species=[0, 1, 6],
+    possible_species=[0, 1, 6, 7, 8],
     n_interactions=3,
     n_atom_layers=3,
     n_features=15,
@@ -639,14 +657,14 @@ def read_args(
     lower_cutoff=0.8,
     upper_cutoff=20.0,
     cutoff_distance=24.0,
-    dataset_location="/projects/ml4chem/xinyang/ethene_with_nacr/dataset",
+    dataset_location="/users/lix/scratch/prosq/dataset",
     dataset_name="eth_",
-    split_ratio=[0.3, 0.2],
+    split_ratio=[0.7, 0.1],
     seed=7777,
     n_workers=1,
     plot_frequency=100,
     init_batch_size=32,
-    max_batch_size=2048,
+    max_batch_size=512,
     init_learning_rate=1e-3,
     raise_batch_patience=96,
     termination_patience=500,
@@ -936,10 +954,10 @@ def read_args(
 if __name__ == "__main__":
     params = read_args(
         db_to_gpu=True,
-        n_states=5,
-        upper_cutoff=10,
+        n_states=2,
+        upper_cutoff=20,
         init_batch_size=512,
-        split_ratio=[0.3, 0.2],
+        split_ratio=[0.1, 0.2],
     )
     # check/create path
     if params.handle_work_dir or params.reload:
