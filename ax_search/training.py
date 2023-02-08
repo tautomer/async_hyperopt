@@ -12,7 +12,7 @@ import matplotlib
 import numpy as np
 import torch
 from hippynn import plotting
-from hippynn.additional import MAEPhaseLoss, MSEPhaseLoss, NACRNode, NACRMultiStateNode
+from hippynn.additional import MAEPhaseLoss, RMSEPhaseLoss, NACRNode, NACRMultiStateNode
 from hippynn.experiment import setup_training, train_model
 from hippynn.experiment.controllers import PatienceController, RaiseBatchSizeOnPlateau
 from hippynn.experiment.serialization import load_checkpoint_from_cwd
@@ -163,7 +163,7 @@ def dipole_target(
         outputs.append(dipole)
     # output dictionary
     d = {
-        "mse_loss_func": MSEPhaseLoss,
+        "mse_loss_func": RMSEPhaseLoss,
         "mae_loss_func": MAEPhaseLoss,
         "norm": np.sqrt(3),
         "loss_weight": 1.0,
@@ -183,7 +183,7 @@ def nacr_target(
     no_reuse_charges=False,
 ):
     training_targets["nacr"] = {
-        "mse_loss_func": MSEPhaseLoss,
+        "mse_loss_func": RMSEPhaseLoss,
         "mae_loss_func": MAEPhaseLoss,
         "norm": np.sqrt(n_atoms * 3),
         "loss_weight": 1.0,
@@ -243,8 +243,6 @@ def build_output_layer(
     # sort the targets so energy or dipole should show up before nacr if exists
     params.training_targets = sorted(params.training_targets)
     for t in params.training_targets:
-        # normalize all letters in the targets to lower case
-        t = t.lower()
         # NACR need to be treated separately
         if t == "nacr":
             if n_states == 1:
@@ -296,7 +294,10 @@ def build_loss(training_targets: dict, network: networks.Hipnn):
         # per node RMSE and MAE
         # also accumulate the total RMSE and MAE for this target
         for j, node in enumerate(outputs):
-            rmse = mse_loss_func.of_node(node) ** 0.5
+            if mse_loss_func == RMSEPhaseLoss:
+                rmse = mse_loss_func.of_node(node)
+            else:
+                rmse = mse_loss_func.of_node(node) ** 0.5
             validation_losses[f"{node.db_name}-RMSE"] = rmse
             mae = mae_loss_func.of_node(node)
             validation_losses[f"{node.db_name}-MAE"] = mae
@@ -413,6 +414,9 @@ def load_database(params: ArgsList, db_info: dict, multi_targets=False, n_states
                     continue
                 n_columns = v.shape[-1]
                 if "NACR" in k.upper():
+                    arrays[k] = v.transpose((0, 3, 1, 2)).reshape(
+                        len(v), -1, params.n_atoms * 3
+                    )
                     columns_expected = n_states * (n_states - 1) // 2
                 else:
                     columns_expected = n_states
@@ -430,6 +434,11 @@ def load_database(params: ArgsList, db_info: dict, multi_targets=False, n_states
                         arrays[k] = v[..., slices]
                     else:
                         arrays[k] = v[..., :columns_expected]
+    else:
+        for k in db_info["targets"]:
+            v = arrays[k]
+            if "NACR" in k.upper():
+                arrays[k] = v.reshape(len(v), -1)
 
     # raise RuntimeError(db_info, database.arr_dict["D"].shape)
     for _, v in db_info.items():
@@ -627,7 +636,9 @@ def read_list(input_str: str):
             return list(map(float, input_str))
         # otherwise keep it as string, and stripe quotes and spaces
         except ValueError:
-            return [_.strip(" '\"") for _ in input_str]
+            # upper case have lower rank when sorting
+            # convert everything to lower case
+            return [_.strip(" '\"").lower() for _ in input_str]
 
 
 def read_args(
