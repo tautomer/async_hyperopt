@@ -12,7 +12,7 @@ import matplotlib
 import numpy as np
 import torch
 from hippynn import plotting
-from hippynn.additional import MAEPhaseLoss, RMSEPhaseLoss, NACRNode, NACRMultiStateNode
+from hippynn.additional import MAEPhaseLoss, MSEPhaseLoss, NACRNode, NACRMultiStateNode
 from hippynn.experiment import setup_training, train_model
 from hippynn.experiment.controllers import PatienceController, RaiseBatchSizeOnPlateau
 from hippynn.experiment.serialization import load_checkpoint_from_cwd
@@ -53,6 +53,7 @@ class ArgsList:
     n_states: int
     n_atoms: int
     training_targets: list
+    target_weights: list
     no_reuse_charges: bool
     multi_targets: bool
     log_filename: str
@@ -92,6 +93,7 @@ def build_network(network_params: dict):
 def energy_target(
     n_states: int,
     network: networks.Hipnn,
+    weight=1.0,
     multi_targets=False,
     include_ground_state=True,
 ):
@@ -126,7 +128,7 @@ def energy_target(
         "mse_loss_func": loss.MSELoss,
         "mae_loss_func": loss.MAELoss,
         "norm": 1,
-        "loss_weight": 1,
+        "loss_weight": weight,
         "outputs": outputs,
         "energy_nodes": energy_nodes,
     }
@@ -137,6 +139,7 @@ def dipole_target(
     n_states: int,
     network: networks.Hipnn,
     positions: inputs.PositionsNode,
+    weight=1.0,
     multi_targets=False,
 ):
     outputs = []
@@ -163,10 +166,10 @@ def dipole_target(
         outputs.append(dipole)
     # output dictionary
     d = {
-        "mse_loss_func": RMSEPhaseLoss,
+        "mse_loss_func": MSEPhaseLoss,
         "mae_loss_func": MAEPhaseLoss,
         "norm": np.sqrt(3),
-        "loss_weight": 1.0,
+        "loss_weight": weight,
         "outputs": outputs,
         "charge_nodes": charge_nodes,
     }
@@ -179,14 +182,15 @@ def nacr_target(
     n_atoms: int,
     network: networks.Hipnn,
     positions: inputs.PositionsNode,
+    weight=1.0,
     multi_targets=False,
     no_reuse_charges=False,
 ):
     training_targets["nacr"] = {
-        "mse_loss_func": RMSEPhaseLoss,
+        "mse_loss_func": MSEPhaseLoss,
         "mae_loss_func": MAEPhaseLoss,
         "norm": np.sqrt(n_atoms * 3),
-        "loss_weight": 1.0,
+        "loss_weight": weight,
     }
     # build the charge_nodes if dipole is not a target
     if "dipole" not in training_targets or no_reuse_charges:
@@ -240,14 +244,13 @@ def build_output_layer(
     n_states = params.n_states
     training_targets = {}
     train_nacr = False
-    # sort the targets so energy or dipole should show up before nacr if exists
-    params.training_targets = sorted(params.training_targets)
-    for t in params.training_targets:
+    for i, t in enumerate(params.training_targets):
+        weight = params.target_weights[i]
         # NACR need to be treated separately
         if t == "nacr":
             if n_states == 1:
                 print("At least 2 states needed to train NACR.")
-            elif "energy" in training_targets:
+            elif "energy" in params.training_targets:
                 train_nacr = True
             else:
                 sys.exit("To train NACR, energies must be in the targets as well.")
@@ -255,11 +258,15 @@ def build_output_layer(
         else:
             if t == "energy":
                 training_targets[t] = energy_target(
-                    n_states, network, params.multi_targets
+                    n_states, network, weight=weight, multi_targets=params.multi_targets
                 )
             elif t == "dipole":
                 training_targets[t] = dipole_target(
-                    n_states, network, positions, params.multi_targets
+                    n_states,
+                    network,
+                    positions,
+                    weight=weight,
+                    multi_targets=params.multi_targets,
                 )
             else:
                 print(f"Unknown target {t}")
@@ -274,8 +281,9 @@ def build_output_layer(
             params.n_atoms,
             network,
             positions,
-            params.multi_targets,
-            params.no_reuse_charges,
+            weight=weight,
+            multi_targets=params.multi_targets,
+            no_reuse_charges=params.no_reuse_charges,
         )
     return training_targets
 
@@ -294,10 +302,7 @@ def build_loss(training_targets: dict, network: networks.Hipnn):
         # per node RMSE and MAE
         # also accumulate the total RMSE and MAE for this target
         for j, node in enumerate(outputs):
-            if mse_loss_func == RMSEPhaseLoss:
-                rmse = mse_loss_func.of_node(node)
-            else:
-                rmse = mse_loss_func.of_node(node) ** 0.5
+            rmse = mse_loss_func.of_node(node) ** 0.5
             validation_losses[f"{node.db_name}-RMSE"] = rmse
             mae = mae_loss_func.of_node(node)
             validation_losses[f"{node.db_name}-MAE"] = mae
@@ -485,6 +490,15 @@ def main(params: ArgsList):
     hippynn.settings.WARN_LOW_DISTANCES = True
     hippynn.settings.TRANSPARENT_PLOT = True
 
+    if params.target_weights is not None:
+        if len(params.training_targets) != len(params.target_weights):
+            raise KeyError(
+                "If the target weights are specified explicitly, the number of weights"
+                " has to match the number of targets."
+            )
+    else:
+        params.target_weights = [1.0] * len(params.training_targets)
+
     # Hyperparameters for the network
     n_interactions = params.n_interactions
     network_params = {
@@ -657,6 +671,7 @@ def read_args(
     n_states=2,
     n_atoms=58,
     training_targets=["energy", "dipole"],
+    target_weights=None,
     no_reuse_charges=False,
     multi_targets=False,
     log_filename="training_log.txt",
@@ -800,6 +815,16 @@ def read_args(
             "comma separated list with the target quantities to train\n"
             "for example --training-targets='energy, dipole' or"
             "--training-targets='energy','dipole'"
+        ),
+    )
+    parser.add_argument(
+        "--target-weights",
+        type=read_list,
+        default=target_weights,
+        help=(
+            "comma separated list with the weights for different targets\n"
+            "for example --target-weights='0.1, 1' or"
+            "--target-weights='0.1','1'"
         ),
     )
     parser.add_argument(
@@ -955,7 +980,6 @@ def read_args(
         default=termination_patience,
         help="number of plateau epochs before early stopping the training process",
     )
-
     # this way `print(args)` will show all fields
     # but `parser.parse_args(namespace=ArgsList)` won't
     args = ArgsList(**vars(parser.parse_args()))

@@ -46,7 +46,7 @@ from training import main, read_args
 ray.init(runtime_env={"working_dir": "."})
 
 
-def evaluate(parameter, checkpoint_dir=None):
+def evaluate(parameter: dict, checkpoint_dir=None):
     """
     Evaluates a trial for MBO HIPNN.
 
@@ -61,10 +61,16 @@ def evaluate(parameter, checkpoint_dir=None):
     gc.collect()
     torch.cuda.empty_cache()
     # initialize and override parameters
+    targets = ["energy", "dipole"]
+    weights = []
+    for i in targets:
+        weights.append(parameter.get(i) or 1.0)
+        del parameter[i]
     params = read_args(
         noprogress=True,
         db_to_gpu=True,
-        training_targets=["energy"],
+        training_targets=targets,
+        target_weights=weights,
         init_batch_size=32,
         raise_batch_patience=60,
         termination_patience=200,
@@ -232,6 +238,19 @@ if __name__ == "__main__":
                     "name": "n_atom_layers",
                     "type": "choice",
                     "values": [3, 4, 5, 6],
+                },
+                {
+                    "name": "dipole",
+                    "type": "fixed",
+                    "value_type": "float",
+                    "value": 1.0,
+                },
+                {
+                    "name": "energy",
+                    "type": "range",
+                    "value_type": "float",
+                    "bounds": [0.001, 0.1],
+                    "log_scale": True,
                 },
             ],
             objectives={
