@@ -34,7 +34,7 @@ import torch
 from ax.core import Trial as AXTrial
 from ax.service.ax_client import AxClient
 from ax.service.utils.instantiation import ObjectiveProperties
-from ray import tune, air
+from ray import air, tune
 from ray.air import session
 from ray.tune.experiment.trial import Trial
 from ray.tune.logger import JsonLoggerCallback, LoggerCallback
@@ -61,6 +61,7 @@ def evaluate(parameter: dict, checkpoint_dir=None):
     gc.collect()
     torch.cuda.empty_cache()
     # initialize and override parameters
+    # targets = ["energy"]
     targets = ["energy", "dipole"]
     weights = []
     for i in targets:
@@ -72,20 +73,31 @@ def evaluate(parameter: dict, checkpoint_dir=None):
         training_targets=targets,
         target_weights=weights,
         init_batch_size=32,
-        raise_batch_patience=60,
+        custom_kernel=True,
+        raise_batch_patience=50,
         termination_patience=200,
-        max_batch_size=512,
+        max_batch_size=2048,
         max_epochs=8001,
         n_states=2,
         bypass_cli_args=True,
-        init_learning_rate=6e-5,
+        init_learning_rate=5e-4,
         **parameter,
     )
     # train model
     with contextlib.redirect_stdout(open(params.log_filename, "w")):
         out = main(params)
 
-    session.report({"Loss": out["Loss"]})
+    e_Loss = out["metric"]["valid"]["ENERGY-Loss"]
+    d_Loss = out["metric"]["valid"]["DIPOLE-Loss"]
+    session.report(
+        {
+            "Loss": out["Loss"],
+            # "Metric": out["Loss"],
+            "Metric": e_Loss + d_Loss / 0.8,
+            "ENERGY-Loss": e_Loss,
+            "DIPOLE-Loss": d_Loss,
+        }
+    )
 
 
 class AxLogger(LoggerCallback):
@@ -112,7 +124,7 @@ class AxLogger(LoggerCallback):
         self.ax_client.save_to_json_file(filepath=self.json)
         shutil.copy(self.json, f"{trial.local_dir}/{self.json}")
         try:
-            data_frame = self.ax_client.get_trials_data_frame().sort_values("Loss")
+            data_frame = self.ax_client.get_trials_data_frame().sort_values("Metric")
             data_frame.to_csv(self.csv, header=True)
         except KeyError:
             pass
@@ -169,7 +181,7 @@ class AxLogger(LoggerCallback):
 if __name__ == "__main__":
     os.chdir("/users/lix/scratch/prosq")
     # TODO: better way to handle restarting of searches
-    restart = False
+    restart = True
     if restart:
         ax_client = AxClient.load_from_json_file(filepath="hyperopt_ray.json")
         # update existing experiment
@@ -200,45 +212,86 @@ if __name__ == "__main__":
             parameters=[
                 {
                     "name": "lower_cutoff",
-                    "type": "range",
+                    "type": "fixed",
                     "value_type": "float",
-                    "bounds": [0.5, 0.95],
+                    "value": 0.6334700267070265,
                 },
                 {
                     "name": "upper_cutoff",
-                    "type": "range",
+                    "type": "fixed",
                     "value_type": "float",
-                    "bounds": [1.5, 10.0],
+                    "value": 7.170363852174164,
                 },
                 {
                     "name": "cutoff_distance",
-                    "type": "range",
+                    "type": "fixed",
                     "value_type": "float",
-                    "bounds": [3.0, 18.0],
-                },
-                {
-                    "name": "n_sensitivities",
-                    "type": "range",
-                    "value_type": "int",
-                    "bounds": [10, 40],
-                },
-                {
-                    "name": "n_features",
-                    "type": "range",
-                    "value_type": "int",
-                    "bounds": [10, 30],
+                    "value": 7.426888330783524,
                 },
                 {
                     "name": "n_interactions",
                     "type": "fixed",
                     "value_type": "int",
-                    "value": 1,
+                    "value": 3,
                 },
                 {
                     "name": "n_atom_layers",
-                    "type": "choice",
-                    "values": [3, 4, 5, 6],
+                    "type": "fixed",
+                    "value": 5,
                 },
+                {
+                    "name": "n_sensitivities",
+                    "type": "range",
+                    "value_type": "int",
+                    "bounds": [20, 40],
+                },
+                {
+                    "name": "n_features",
+                    "type": "range",
+                    "value_type": "int",
+                    "bounds": [20, 60],
+                },
+                # {
+                #     "name": "lower_cutoff",
+                #     "type": "range",
+                #     "value_type": "float",
+                #     "bounds": [0.5, 0.95],
+                # },
+                # {
+                #     "name": "upper_cutoff",
+                #     "type": "range",
+                #     "value_type": "float",
+                #     "bounds": [1.5, 10.0],
+                # },
+                # {
+                #     "name": "cutoff_distance",
+                #     "type": "range",
+                #     "value_type": "float",
+                #     "bounds": [1.75, 15.0],
+                # },
+                # {
+                #     "name": "n_sensitivities",
+                #     "type": "range",
+                #     "value_type": "int",
+                #     "bounds": [20, 40],
+                # },
+                # {
+                #     "name": "n_features",
+                #     "type": "range",
+                #     "value_type": "int",
+                #     "bounds": [20, 60],
+                # },
+                # {
+                #     "name": "n_interactions",
+                #     "type": "choice",
+                #     "value_type": "int",
+                #     "values": [1, 2, 3],
+                # },
+                # {
+                #     "name": "n_atom_layers",
+                #     "type": "choice",
+                #     "values": [2, 3, 4, 5],
+                # },
                 {
                     "name": "dipole",
                     "type": "fixed",
@@ -249,22 +302,25 @@ if __name__ == "__main__":
                     "name": "energy",
                     "type": "range",
                     "value_type": "float",
-                    "bounds": [0.001, 0.1],
-                    "log_scale": True,
+                    "bounds": [0.1, 2],
+                    # "log_scale": True,
                 },
             ],
             objectives={
-                "Loss": ObjectiveProperties(minimize=True),
+                "Metric": ObjectiveProperties(minimize=True, threshold=2),
+                # "Loss": ObjectiveProperties(minimize=True),
+                # "DIPOLE-Loss": ObjectiveProperties(minimize=True, threshold=0.5),
+                # "ENERGY-Loss": ObjectiveProperties(minimize=True, threshold=1.0),
             },
             overwrite_existing_experiment=True,
             is_test=False,
             # slightly more overhead
             # but make it possible to adjust the experiment setups
             immutable_search_space_and_opt_config=False,
-            parameter_constraints=[
-                "lower_cutoff <= upper_cutoff",
-                "upper_cutoff <= cutoff_distance",
-            ],
+            # parameter_constraints=[
+            #     "lower_cutoff <= upper_cutoff",
+            #     "upper_cutoff <= cutoff_distance",
+            # ],
         )
 
     # run the optimization Loop.
@@ -273,9 +329,9 @@ if __name__ == "__main__":
     ax_logger = AxLogger(ax_client, "hyperopt_ray.json", "hyperopt.csv")
     tuner = tune.Tuner(
         tune.with_resources(evaluate, resources={"gpu": 1}),
-        tune_config=tune.TuneConfig(search_alg=algo, num_samples=40),
+        tune_config=tune.TuneConfig(search_alg=algo, num_samples=10),
         run_config=air.RunConfig(
-            local_dir="./test_ray",
+            local_dir="./all_in_one",
             verbose=0,
             callbacks=[ax_logger, JsonLoggerCallback()],
             log_to_file=True,

@@ -446,9 +446,14 @@ def load_database(params: ArgsList, db_info: dict, multi_targets=False, n_states
                 arrays[k] = v.reshape(len(v), -1)
 
     # raise RuntimeError(db_info, database.arr_dict["D"].shape)
+    shift = None
     for _, v in db_info.items():
         for k in v:
             arrays[k] = arrays[k][:100000]
+            if "E" in k:
+                if not shift:
+                    shift = np.min(arrays[k])
+                arrays[k] -= shift
     arrays["indices"] = arrays["indices"][:100000]
 
     database.make_trainvalidtest_split(*params.split_ratio)
@@ -487,7 +492,7 @@ def main(params: ArgsList):
     if params.noprogress:
         hippynn.settings.PROGRESS = None
     hippynn.custom_kernels.set_custom_kernels(params.custom_kernel)
-    hippynn.settings.WARN_LOW_DISTANCES = True
+    hippynn.settings.WARN_LOW_DISTANCES = False
     hippynn.settings.TRANSPARENT_PLOT = True
 
     if params.target_weights is not None:

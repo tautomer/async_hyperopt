@@ -19,7 +19,7 @@ except KeyError:
     print("All losses are NaNs.")
 
 
-data_frame = restored_Ax_client.get_trials_data_frame().sort_values("Loss")
+data_frame = restored_Ax_client.get_trials_data_frame().sort_values("Metric")
 data_frame.to_csv("hyperopt.csv", header=True)
 
 # best_obj_val = min(data_frame['Loss'])
