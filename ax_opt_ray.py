@@ -1,11 +1,11 @@
-#!/users/lix/miniconda3/envs/hippynn/bin/python3 -u
+#!/usr/bin/env python3
 # fmt: off
 ##SBATCH --time=16:00:00
 #SBATCH --time=4-00:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=64
 #SBATCH --mail-type=all
-#SBATCH -p gpu -A w23_mlqed_g
+#SBATCH -p gpu 
 #SBATCH -J parallel_hyperopt
 #SBATCH --qos=long
 #SBATCH -o run.log

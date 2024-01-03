@@ -1,9 +1,14 @@
-# Ax Search
+# Asynchronous parallelized hyperparameter tuning with Ray and Ax
 
-Scripts for performing hyper-parameter searching.
+Scripts to perform asynchronous parallelized hyperparameter tuning based on
+[ray](https://docs.ray.io/en/latest/) and [Ax](https://github.com/facebook/Ax).
+These scripts were used to train models reported in
+[this paper](https://pubs.acs.org/doi/full/10.1021/acs.jctc.3c01068). The
+excited-state module is implemented in
+[hippynn](https://github.com/lanl/hipynn). The training data used in the paper
+is available on [zenodo](https://zenodo.org/records/7076420).
 
-The script with [ray](https://docs.ray.io/en/latest/) should be in working
-state. Here is a demonstration of all 4 GPUs are occupied on `cn4075`.
+Here is a demonstration of all 4 GPUs are occupied on a compute node `cn4075`.
 
 ```plaintext
 Mon Oct 10 23:33:53 2022
@@ -44,14 +49,14 @@ Mon Oct 10 23:33:53 2022
 +-----------------------------------------------------------------------------+
 ```
 
-As of now (Sep 28), `gpytorch < 1.9.1` and `pandas < 1.5.0` are needed for
-`ax-platform` to run. `ray = 2.0.0` is used. Other dependencies should be
-trivial. The ray version demo script has been tested with this setup.
+## Dependencies
 
-### Scripts
+There should not a requirement on specific versions of libraries, but the
+scripts have been tested with `ax-platform 0.3.1`, `ray 2.3.0`, and some
+previous verions of the two packages.
 
-* [ax_opt_seq.py](./ax_opt_seq.py) is the script for sequential
-  searching.
+## Scripts
+
 * [ax_opt_ray.py](./ax_opt_ray.py) is the demo script for paralleled
   searching with ray. The trials can be asynchronous. The script is inspired by
   [the tutorial script in the docs](https://ax.dev/tutorials/raytune_pytorch_cnn.html).
@@ -60,7 +65,7 @@ trivial. The ray version demo script has been tested with this setup.
 * [analyze.py](./analyze.py) is used to parse the ax search results to
   some human readable information.
 
-### Notes
+## Notes
 
 1. `ray` will launch `actors` to run trials. It's dangerous not only for running
    scripts with relative path with `os.system` or `subprocess`, but also for
