@@ -5,7 +5,7 @@ Scripts to perform asynchronous parallelized hyperparameter tuning based on
 These scripts were used to train models reported in
 [this paper](https://pubs.acs.org/doi/full/10.1021/acs.jctc.3c01068). The
 excited-state module is implemented in
-[hippynn](https://github.com/lanl/hipynn). The training data used in the paper
+[hippynn](https://github.com/lanl/hippynn). The training data used in the paper
 is available on [zenodo](https://zenodo.org/records/7076420).
 
 Here is a demonstration of all 4 GPUs are occupied on a compute node `cn4075`.
