@@ -53,7 +53,10 @@ Mon Oct 10 23:33:53 2022
 
 There should not a requirement on specific versions of libraries, but the
 scripts have been tested with `ax-platform 0.3.1`, `ray 2.3.0`, and some
-previous verions of the two packages.
+previous versions of the two packages.
+
+Note: several changes made in recent versions of `ray` will break this script.
+You should install `ray < 2.7.0`.
 
 ## Scripts
 

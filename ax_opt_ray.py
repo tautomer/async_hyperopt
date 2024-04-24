@@ -331,10 +331,7 @@ if __name__ == "__main__":
         tune.with_resources(evaluate, resources={"gpu": 1}),
         tune_config=tune.TuneConfig(search_alg=algo, num_samples=10),
         run_config=air.RunConfig(
-            # `local_dir=relative_path` no longer works for ray >= 2.10
-            # now you should use `storage_path=absolute_path`
-            # https://docs.ray.io/en/latest/train/user-guides/persistent-storage.html#setting-the-local-staging-directory
-            storage_path="/users/lix/scratch/prosq/all_in_one",
+            local_dir="./all_in_one",
             verbose=0,
             callbacks=[ax_logger, JsonLoggerCallback()],
             log_to_file=True,
